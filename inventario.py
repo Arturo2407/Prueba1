@@ -124,9 +124,12 @@ class Inventario(tk.Tk):
         self.title("Gestor de inventario")
         self.geometry("400x500")
         self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self.cerrar)
 
         self.datos = self.cargar()
         self.almacenes_por_texto = {}
+        # iid de cada fila de la tabla -> (lista donde vive el artículo, diccionario del artículo)
+        self.filas = {}
         self.crear_widgets()
         self.actualizar_almacenes()
         self.actualizar_familias()
@@ -173,29 +176,23 @@ class Inventario(tk.Tk):
     def familias(self):
         return self.datos["familias"]
 
+    def codigo_almacen(self):
+        texto = self.cbo_alm.get()
+        return self.almacenes_por_texto.get(texto) if texto else None
+
     def ruta(self):
         """Devuelve (familia, subfamilia, categoría, código de almacén) o None si falta algún nivel."""
-        fam, sub = self.cbo_fam.get(), self.cbo_sub.get()
-        cat, alm = self.cbo_cat.get(), self.cbo_alm.get()
-        if not (fam and sub and cat and alm):
+        fam, sub, cat = self.cbo_fam.get(), self.cbo_sub.get(), self.cbo_cat.get()
+        codigo = self.codigo_almacen()
+        if not (fam and sub and cat and codigo):
             return None
-        return fam, sub, cat, self.almacenes_por_texto[alm]
-
-    def nodo_articulos(self, crear=False):
-        ruta = self.ruta()
-        if ruta is None:
-            return None
-        fam, sub, cat, codigo = ruta
-        categorias = self.familias()[fam]["subfamilias"][sub]["categorias"][cat]
-        if crear:
-            return categorias.setdefault(codigo, [])
-        return categorias.get(codigo, [])
+        return fam, sub, cat, codigo
 
     # ----- interfaz -----
 
     def crear_widgets(self):
         # Se empaquetan primero los elementos de abajo para que no se recorten al cambiar el tamaño.
-        ttk.Button(self, text="Cerrar aplicación", command=self.destroy).pack(
+        ttk.Button(self, text="Cerrar aplicación", command=self.cerrar).pack(
             side="bottom", fill="x", padx=12, pady=(8, 12))
 
         self.resumen = ttk.Label(self, padding=(12, 6, 12, 0))
@@ -220,7 +217,7 @@ class Inventario(tk.Tk):
         self.cbo_alm = ttk.Combobox(self.superior, state="readonly")
         self.cbo_fam.bind("<<ComboboxSelected>>", lambda _e: self.actualizar_subfamilias())
         self.cbo_sub.bind("<<ComboboxSelected>>", lambda _e: self.actualizar_categorias())
-        self.cbo_cat.bind("<<ComboboxSelected>>", lambda _e: self.actualizar_lista())
+        self.cbo_cat.bind("<<ComboboxSelected>>", lambda _e: self.actualizar_botones())
         self.cbo_alm.bind("<<ComboboxSelected>>", lambda _e: self.actualizar_lista())
 
         self.fila_nivel("Familia:", 0, self.cbo_fam, self.nueva_familia, self.borrar_familia)
@@ -230,16 +227,18 @@ class Inventario(tk.Tk):
 
         medio = ttk.Frame(self, padding=(12, 8, 12, 0))
         medio.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(medio, columns=("articulo", "ud", "stock", "unidad"),
+        self.tree = ttk.Treeview(medio, columns=("articulo", "categoria", "ud", "stock", "unidad"),
                                  show="headings", selectmode="browse", height=9)
         self.tree.heading("articulo", text="Artículo")
+        self.tree.heading("categoria", text="Categoría")
         self.tree.heading("ud", text="Ud.")
         self.tree.heading("stock", text="Stock")
         self.tree.heading("unidad", text="Unidad")
-        self.tree.column("articulo", width=150, stretch=False)
-        self.tree.column("ud", width=85, anchor="e", stretch=False)
-        self.tree.column("stock", width=60, anchor="e", stretch=False)
-        self.tree.column("unidad", width=60, stretch=False)
+        self.tree.column("articulo", width=110, stretch=False)
+        self.tree.column("categoria", width=85, stretch=False)
+        self.tree.column("ud", width=60, anchor="e", stretch=False)
+        self.tree.column("stock", width=50, anchor="e", stretch=False)
+        self.tree.column("unidad", width=45, stretch=False)
         barra = ttk.Scrollbar(medio, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=barra.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -259,13 +258,13 @@ class Inventario(tk.Tk):
     def _habilitar(widget, activo):
         widget.state(["!disabled"] if activo else ["disabled"])
 
-    def indice_seleccionado(self):
+    def iid_seleccionado(self):
         seleccion = self.tree.selection()
-        return int(seleccion[0]) if seleccion else None
+        return seleccion[0] if seleccion else None
 
     def actualizar_botones(self):
         hay_ruta = self.ruta() is not None
-        hay_seleccion = self.indice_seleccionado() is not None
+        hay_seleccion = self.iid_seleccionado() is not None
         self._habilitar(self.btn_agregar, hay_ruta)
         self._habilitar(self.btn_modificar, hay_seleccion)
         self._habilitar(self.btn_eliminar, hay_seleccion)
@@ -284,7 +283,7 @@ class Inventario(tk.Tk):
         fam, sub = self.cbo_fam.get(), self.cbo_sub.get()
         cats = list(self.familias()[fam]["subfamilias"][sub]["categorias"]) if fam and sub else []
         _fijar(self.cbo_cat, cats, seleccion)
-        self.actualizar_lista()
+        self.actualizar_botones()
 
     def actualizar_almacenes(self, codigo=None):
         self.almacenes_por_texto = {f"{c} - {e}": c for c, e in self.datos["almacenes"].items()}
@@ -293,24 +292,34 @@ class Inventario(tk.Tk):
         self.actualizar_lista()
 
     def actualizar_lista(self):
+        """Muestra todos los artículos del almacén seleccionado, de cualquier familia, subfamilia o categoría."""
         for iid in self.tree.get_children():
             self.tree.delete(iid)
+        self.filas = {}
 
-        articulos = self.nodo_articulos() or []
+        codigo = self.codigo_almacen()
+        if codigo is None:
+            self.resumen.config(text="Elige un almacén para ver su inventario.")
+            self.actualizar_botones()
+            return
+
         valor = 0.0
-        for indice, articulo in enumerate(articulos):
-            self.tree.insert("", "end", iid=str(indice), values=(
-                articulo["nombre"],
-                f"${articulo['precio']:,.2f}",
-                articulo["stock"],
-                articulo["unidad"],
-            ))
-            valor += articulo["precio"] * articulo["stock"]
+        for fam in self.familias().values():
+            for sub in fam["subfamilias"].values():
+                for cat, almacenes in sub["categorias"].items():
+                    for articulo in almacenes.get(codigo, []):
+                        iid = str(len(self.filas))
+                        self.filas[iid] = (almacenes[codigo], articulo)
+                        self.tree.insert("", "end", iid=iid, values=(
+                            articulo["nombre"],
+                            cat,
+                            f"${articulo['precio']:,.2f}",
+                            articulo["stock"],
+                            articulo["unidad"],
+                        ))
+                        valor += articulo["precio"] * articulo["stock"]
 
-        if self.ruta() is None:
-            self.resumen.config(text="Elige familia, subfamilia, categoría y almacén.")
-        else:
-            self.resumen.config(text=f"{len(articulos)} artículo(s) · Valor en stock: ${valor:,.2f}")
+        self.resumen.config(text=f"{len(self.filas)} artículo(s) · Valor en stock: ${valor:,.2f}")
         self.actualizar_botones()
 
     # ----- niveles: familia, subfamilia, categoría y almacén -----
@@ -415,37 +424,44 @@ class Inventario(tk.Tk):
     # ----- artículos -----
 
     def agregar(self):
-        if self.ruta() is None:
+        ruta = self.ruta()
+        if ruta is None:
             return
+        fam, sub, cat, codigo = ruta
         formulario = FormularioArticulo(self, "Nuevo artículo")
         if formulario.resultado:
-            self.nodo_articulos(crear=True).append(formulario.resultado)
+            categorias = self.familias()[fam]["subfamilias"][sub]["categorias"][cat]
+            categorias.setdefault(codigo, []).append(formulario.resultado)
             self.guardar()
             self.actualizar_lista()
 
     def modificar(self):
-        indice = self.indice_seleccionado()
-        if indice is None:
+        iid = self.iid_seleccionado()
+        if iid is None:
             return
-        articulos = self.nodo_articulos()
-        formulario = FormularioArticulo(self, "Modificar artículo", articulos[indice])
+        _, articulo = self.filas[iid]
+        formulario = FormularioArticulo(self, "Modificar artículo", articulo)
         if formulario.resultado:
-            articulos[indice] = formulario.resultado
+            articulo.update(formulario.resultado)
             self.guardar()
             self.actualizar_lista()
-            self.tree.selection_set(str(indice))
 
     def eliminar(self):
-        indice = self.indice_seleccionado()
-        if indice is None:
+        iid = self.iid_seleccionado()
+        if iid is None:
             return
-        articulos = self.nodo_articulos()
-        nombre = articulos[indice]["nombre"]
-        if not messagebox.askyesno("Confirmar", f"¿Eliminar el artículo '{nombre}'?", parent=self):
+        lista, articulo = self.filas[iid]
+        if not messagebox.askyesno("Confirmar", f"¿Eliminar el artículo '{articulo['nombre']}'?", parent=self):
             return
-        del articulos[indice]
+        # Se compara por identidad: dos artículos pueden tener los mismos datos.
+        indice = next(i for i, a in enumerate(lista) if a is articulo)
+        del lista[indice]
         self.guardar()
         self.actualizar_lista()
+
+    def cerrar(self):
+        self.quit()
+        self.destroy()
 
 
 if __name__ == "__main__":
